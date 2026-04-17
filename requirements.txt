@@ -1,5 +1,5 @@
-   streamlit
-   openpyxl
-   pandas
-   plotly
-   reportlab
+     streamlit
+     openpyxl
+     pandas
+     plotly
+     xlsxwriter
