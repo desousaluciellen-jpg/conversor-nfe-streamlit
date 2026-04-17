@@ -28,10 +28,21 @@ def extrair(arquivo):
     wb=openpyxl.load_workbook(arquivo,data_only=True); ws=wb.active
     headers=[ws.cell(1,c).value for c in range(1,ws.max_column+1)]
     notas=defaultdict(lambda:{'serie':None,'numero':None,'dataEmissao':None,'itens':[]})
+    emitente_info = {}
     for r in range(2,ws.max_row+1):
         row={h:ws.cell(r,c).value for c,h in enumerate(headers,1)}
         chave=row.get('ChaveAcesso')
         if chave and row.get('DescricaoProduto'):
+            # Captura dados do emitente da primeira nota válida
+            if not emitente_info:
+                emitente_info = {
+                    'cnpj': str(row.get('CnpjEmitente') or ''),
+                    'razao': str(row.get('RazaoSocialEmitente') or row.get('NomeEmitente') or 'Não informado'),
+                    'fantasia': str(row.get('NomeFantasiaEmitente') or row.get('xFant') or ''),
+                    'ie': str(row.get('InscricaoEstadualEmitente') or row.get('IE') or ''),
+                    'cidade': str(row.get('CidadeEmitente') or row.get('MunicipioEmitente') or ''),
+                    'uf': str(row.get('UFEmitente') or row.get('UF') or ''),
+                }
             notas[chave]['serie']=row.get('SerieDocumento')
             notas[chave]['numero']=row.get('NumeroDocumento')
             notas[chave]['dataEmissao']=row.get('DataEmissaoNfe')
@@ -40,62 +51,37 @@ def extrair(arquivo):
                 'valorTotal':float(row.get('ValorTotalProduto') or 0),
                 'valorDesconto':float(row.get('ValorDesconto') or 0),
             })
-    return notas
+    return notas, emitente_info
 
-def gerar_xml(chave,nota,emit):
-    return f'<?xml version="1.0"?><NFe><infNFe Id="{chave}"><ide><nNF>{nota["numero"]}</nNF></ide></infNFe></NFe>'
-
-def criar_excel(resumo_cfop, total_bruto,total_desc,total_liq, emitente, periodo):
-    output=io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # aba resumo
-        df_resumo=pd.DataFrame([{
-            'Emitente':emitente['razao'],'CNPJ':emitente['cnpj'],'Período':periodo,
-            'Total Bruto':total_bruto,'Descontos':total_desc,'Total Líquido':total_liq
-        }])
-        df_resumo.to_excel(writer, sheet_name='Resumo Geral', index=False)
-        resumo_cfop.to_excel(writer, sheet_name='Por CFOP', index=False)
-    output.seek(0); return output
-
-def criar_pdf(resumo_cfop, total_bruto,total_desc,total_liq, emitente, periodo):
-    buffer=io.BytesIO()
-    doc=SimpleDocTemplate(buffer, pagesize=A4)
-    styles=getSampleStyleSheet(); elems=[]
-    elems.append(Paragraph(f"<b>Resumo Fiscal NFe</b>", styles['Title']))
-    elems.append(Paragraph(f"Emitente: {emitente['razao']} - CNPJ: {emitente['cnpj']}<br/>Período: {periodo}", styles['Normal']))
-    elems.append(Spacer(1,12))
-    data=[['CFOP','Itens','Bruto','Desc.','Líquido']]
-    for _,r in resumo_cfop.iterrows():
-        data.append([r['cfop'], int(r['Qtde_Itens']), f"R$ {r['Valor_Bruto']:,.2f}", f"R$ {r['Descontos']:,.2f}", f"R$ {r['Valor_Liquido']:,.2f}"])
-    data.append(['TOTAL','',f"R$ {total_bruto:,.2f}",f"R$ {total_desc:,.2f}",f"R$ {total_liq:,.2f}"])
-    t=Table(data, colWidths=[60,50,90,70,90])
-    t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#1e3a8a')),('TEXTCOLOR',(0,0),(-1,0),colors.white),
-                           ('ALIGN',(1,0),(-1,-1),'RIGHT'),('GRID',(0,0),(-1,-1),0.5,colors.grey)]))
-    elems.append(t)
-    doc.build(elems); buffer.seek(0); return buffer
-
-with st.sidebar:
-    st.markdown("### Emitente")
-    emitente={"cnpj":st.text_input("CNPJ","00.000.000/0001-91"),"razao":st.text_input("Razão","DNA RESTAURANTE LTDA")}
-
-st.markdown('<div class="hero"><h1>📄 Conversor NFe 2.0 Pro</h1><p>XML + Excel + PDF + Gráfico por CFOP</p></div>', unsafe_allow_html=True)
+st.markdown('<div class="hero"><h1>📄 Conversor NFe 2.0 Pro</h1><p>XML + Excel + PDF + Gráfico — Emitente automático do Excel</p></div>', unsafe_allow_html=True)
 
 up=st.file_uploader("Planilha .xlsx", type="xlsx")
 if up:
-    notas=extrair(up)
+    notas, emitente = extrair(up)
+    if not notas:
+        st.error("Nenhuma nota válida encontrada na planilha.")
+        st.stop()
+    
     itens=[i for n in notas.values() for i in n['itens']]
     df=pd.DataFrame(itens)
     total_bruto=df['valorTotal'].sum(); total_desc=df['valorDesconto'].sum(); total_liq=total_bruto-total_desc
     datas=[n['dataEmissao'] for n in notas.values() if n['dataEmissao']]
-    periodo=f"{min(datas).strftime('%d/%m/%Y')} a {max(datas).strftime('%d/%m/%Y')}" if datas else "-"
+    datas_dt=[d if isinstance(d,datetime) else pd.to_datetime(d,errors='coerce') for d in datas]
+    periodo=f"{min(datas_dt).strftime('%d/%m/%Y')} a {max(datas_dt).strftime('%d/%m/%Y')}" if datas_dt else "-"
     
     resumo=df.groupby('cfop').agg(Qtde_Itens=('valorTotal','count'),Valor_Bruto=('valorTotal','sum'),Descontos=('valorDesconto','sum')).reset_index()
     resumo['Valor_Liquido']=resumo['Valor_Bruto']-resumo['Descontos']
-    resumo=resumo.rename(columns={'cfop':'cfop'})
+    
+    # Info do emitente lida do Excel
+    st.info(f"**Emitente detectado:** {emitente['razao']} • **CNPJ:** {emitente['cnpj']} • **IE:** {emitente['ie']} • **Período:** {periodo}", icon="🏢")
     
     c1,c2,c3,c4=st.columns(4)
-    for col,lab,val in zip([c1,c2,c3,c4],["Notas","Bruto","Descontos","Líquido"],[len(notas),total_bruto,total_desc,total_liq]):
-        with col: st.markdown(f'<div class="metric-card"><div>{lab}</div><div class="metric-value">{"R$ {:,.2f}".format(val) if "R" not in lab and lab!="Notas" else (str(val) if lab=="Notas" else "R$ {:,.2f}".format(val))}</div></div>', unsafe_allow_html=True)
+    vals=[len(notas), total_bruto, total_desc, total_liq]
+    labels=["Notas Emitidas","Total Bruto","Descontos","Total Líquido"]
+    for col,lab,val in zip([c1,c2,c3,c4],labels,vals):
+        with col:
+            val_str = f"R$ {val:,.2f}" if lab!="Notas Emitidas" else str(int(val))
+            st.markdown(f'<div class="metric-card"><div>{lab}</div><div class="metric-value">{val_str}</div></div>', unsafe_allow_html=True)
     
     colA,colB=st.columns([1.2,1])
     with colA:
@@ -103,22 +89,33 @@ if up:
         st.dataframe(resumo.style.format({'Valor_Bruto':'R$ {:,.2f}','Descontos':'R$ {:,.2f}','Valor_Liquido':'R$ {:,.2f}'}), use_container_width=True)
     with colB:
         st.subheader("Gráfico por CFOP")
-        fig=px.pie(resumo, names='cfop', values='Valor_Liquido', hole=0.4, title="Distribuição do Valor Líquido")
+        fig=px.pie(resumo, names='cfop', values='Valor_Liquido', hole=0.4, title="Distribuição Líquida")
         fig.update_traces(textinfo='percent+label')
         st.plotly_chart(fig, use_container_width=True)
     
-    # Gerar arquivos
-    excel_bytes=criar_excel(resumo,total_bruto,total_desc,total_liq,emitente,periodo)
-    pdf_bytes=criar_pdf(resumo,total_bruto,total_desc,total_liq,emitente,periodo)
+    # Download
+    excel_buf=io.BytesIO()
+    with pd.ExcelWriter(excel_buf, engine='openpyxl') as writer:
+        pd.DataFrame([{'Emitente':emitente['razao'],'CNPJ':emitente['cnpj'],'Período':periodo,'Bruto':total_bruto,'Descontos':total_desc,'Líquido':total_liq}]).to_excel(writer, sheet_name='Resumo', index=False)
+        resumo.to_excel(writer, sheet_name='Por CFOP', index=False)
+    excel_buf.seek(0)
+    
+    pdf_buf=io.BytesIO()
+    doc=SimpleDocTemplate(pdf_buf, pagesize=A4)
+    styles=getSampleStyleSheet(); elems=[Paragraph(f"<b>Resumo Fiscal</b><br/>{emitente['razao']} - {emitente['cnpj']}", styles['Title'])]
+    data=[['CFOP','Itens','Bruto','Desc.','Líquido']]
+    for _,r in resumo.iterrows(): data.append([r['cfop'],int(r['Qtde_Itens']),f"R$ {r['Valor_Bruto']:,.2f}",f"R$ {r['Descontos']:,.2f}",f"R$ {r['Valor_Liquido']:,.2f}"])
+    t=Table(data); t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#1e3a8a')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),0.5,colors.grey)]))
+    elems.append(t); doc.build(elems); pdf_buf.seek(0)
     
     zip_buf=io.BytesIO()
     with zipfile.ZipFile(zip_buf,'w',zipfile.ZIP_DEFLATED) as z:
         for chave,nota in notas.items():
-            z.writestr(f"xmls/NFe_{nota['numero']}.xml", gerar_xml(chave,nota,emitente))
-        z.writestr("resumo/Resumo_NFe.xlsx", excel_bytes.getvalue())
-        z.writestr("resumo/Resumo_NFe.pdf", pdf_bytes.getvalue())
+            z.writestr(f"xmls/NFe_{nota['numero']}.xml", f'<NFe><emit><CNPJ>{emitente["cnpj"]}</CNPJ></emit></NFe>')
+        z.writestr("resumo/Resumo_NFe.xlsx", excel_buf.getvalue())
+        z.writestr("resumo/Resumo_NFe.pdf", pdf_buf.getvalue())
     zip_buf.seek(0)
     
-    st.download_button("⬇️ BAIXAR PACOTE COMPLETO (XMLs + Excel + PDF)", zip_buf, f"Pacote_NFe_{datetime.now().strftime('%Y%m%d')}.zip", "application/zip")
+    st.download_button("⬇️ BAIXAR PACOTE COMPLETO", zip_buf, f"Pacote_NFe_{datetime.now().strftime('%Y%m%d')}.zip", "application/zip")
 else:
-    st.info("Faça upload para gerar XMLs, Excel, PDF e gráfico.")
+    st.info("Envie a planilha. O emitente será lido automaticamente do arquivo.")
