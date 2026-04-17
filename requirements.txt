@@ -1,2 +1,5 @@
-streamlit
-openpyxl
+   streamlit
+   openpyxl
+   pandas
+   plotly
+   reportlab
