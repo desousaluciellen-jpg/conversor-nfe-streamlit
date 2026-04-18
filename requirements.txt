@@ -1,5 +1,5 @@
-     streamlit
-     openpyxl
-     pandas
-     plotly
-     xlsxwriter
+streamlit>=1.35.0
+openpyxl>=3.1.2
+pandas>=2.2.2
+plotly>=5.22.0
+reportlab>=4.1.0
